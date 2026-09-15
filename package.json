@@ -1,0 +1,17 @@
+{
+  "name": "antigravity-workers",
+  "version": "0.3.0",
+  "description": "Supervised Antigravity workers and teams for Codex.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Varun Chhibber",
+  "repository": { "type": "git", "url": "https://github.com/McDuckVc/antigravity-workers.git" },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "test": "node scripts/self-test.mjs && node scripts/runtime-regression-test.mjs",
+    "test:runtime": "node scripts/runtime-regression-test.mjs",
+    "test:live": "node scripts/smoke-real.mjs"
+  }
+}

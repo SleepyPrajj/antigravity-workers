@@ -1,0 +1,12 @@
+interface:
+  display_name: "Antigravity Orchestrator"
+  short_description: "Supervise Gemini workers across code and media"
+  default_prompt: "Use $antigravity-orchestrator to delegate bounded code or research work, analyze explicitly supplied media and documents, or create images natively, while retaining final validation in Codex."
+policy:
+  allow_implicit_invocation: true
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "antigravity-workers"
+      description: "Local asynchronous Antigravity worker service"
+      transport: "stdio"

@@ -1,0 +1,39 @@
+{
+  "name": "antigravity-workers",
+  "version": "0.3.0",
+  "description": "Run supervised Antigravity workers and teams for code, research, multimodal file analysis, and native image generation with safe integration.",
+  "author": {
+    "name": "Varun Chhibber",
+    "url": "https://github.com/McDuckVc"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Antigravity Workers",
+    "shortDescription": "Supervise Antigravity workers across code and media.",
+    "longDescription": "Codex orchestrates queued Google Antigravity workers for parallel analysis, native image creation and editing, isolated multimodal research-file inspection, peer review, correction rounds, live activity, retries, and patch-based implementation.",
+    "developerName": "Varun Chhibber",
+    "category": "Productivity",
+    "capabilities": [
+      "Analysis",
+      "Write",
+      "Interactive",
+      "Image"
+    ],
+    "defaultPrompt": [
+      "Run a supervised Antigravity team and show its live dashboard.",
+      "Analyze these images, PDFs, audio, video, or research files with Antigravity.",
+      "Generate or edit an image using Antigravity's native image tool."
+    ]
+  },
+  "mcpServers": "./.mcp.json",
+  "repository": "https://github.com/McDuckVc/antigravity-workers",
+  "homepage": "https://github.com/McDuckVc/antigravity-workers",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "antigravity",
+    "mcp",
+    "agents",
+    "gemini"
+  ]
+}
