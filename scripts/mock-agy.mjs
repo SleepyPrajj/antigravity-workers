@@ -45,7 +45,8 @@ await new Promise((resolve) => setTimeout(resolve, 80));
 emitResult({
   conversation_id: conversation,
   status: "SUCCESS",
-  response: prompt.includes("native generate_image tool") ? "" : `MOCK_OK: ${prompt.slice(0, 80)}`,
+  response: prompt.includes("native generate_image tool") ? "" : prompt.includes("DENY_EDIT_TEST") ? "The requested command was denied." : `MOCK_OK: ${prompt.slice(0, 80)}`,
+  denied_actions: prompt.includes("DENY_EDIT_TEST") ? { action: "command", display_name: "RunCommand" } : undefined,
   duration_seconds: 0.08,
   num_turns: 1,
   usage: { input_tokens: 10, output_tokens: 5 },

@@ -637,6 +637,14 @@ function parseAgyOutput(buffer) {
   }
 }
 
+function deniedActionSummary(actions) {
+  const entries = Array.isArray(actions) ? actions : actions ? [actions] : [];
+  const names = entries
+    .map((entry) => typeof entry === "string" ? entry : entry?.display_name || entry?.action)
+    .filter(Boolean);
+  return names.length ? ` Required actions were denied: ${[...new Set(names)].join(", ")}.` : "";
+}
+
 function publicRun(run, { includePrompt = false } = {}) {
   const copy = { ...run };
   delete copy.slot;
@@ -806,6 +814,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
     run.exit_code = code;
     run.signal = signal;
     run.finished_at = isoNow();
+    let editResultInvalid = false;
     try {
       const payload = parseAgyOutput(Buffer.concat(stdoutChunks));
       run.conversation_id = payload.conversation_id || run.conversation_id;
@@ -835,8 +844,23 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
       run.status = run.cancellation_requested ? "cancelled" : "failed";
       run.error = error.message;
     }
+    if (run.kind === "edit") {
+      delete run.patch_error;
+      await capturePatch(run).catch((error) => {
+        run.patch_error = error.message;
+      });
+      if (run.status === "succeeded" && run.patch_error) {
+        run.status = "failed";
+        run.error = `Antigravity reported success but its patch could not be captured: ${run.patch_error}`;
+        editResultInvalid = true;
+      } else if (run.status === "succeeded" && (!run.patch || run.patch.empty)) {
+        run.status = "failed";
+        run.error = `Antigravity reported success but produced no code changes.${deniedActionSummary(run.denied_actions)}`;
+        editResultInvalid = true;
+      }
+    }
     await completeWorkerTerminal(run);
-    const shouldRetry = run.status === "failed" && !run.cancellation_requested && run.attempt <= (run.max_retries || 0);
+    const shouldRetry = run.status === "failed" && !editResultInvalid && !run.cancellation_requested && run.attempt <= (run.max_retries || 0);
     if (shouldRetry) {
       addRunEvent(run, "retrying", { attempt: run.attempt + 1, error: run.error });
       delete run.pid;
@@ -849,11 +873,6 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
       return;
     }
     addRunEvent(run, run.status, { exit_code: code, duration_seconds: run.duration_seconds });
-    if (run.kind === "edit") {
-      await capturePatch(run).catch((error) => {
-        run.patch_error = error.message;
-      });
-    }
     await releaseSlot(slot);
     await writeRun(run).catch(() => {});
     await pumpQueue().catch(() => {});

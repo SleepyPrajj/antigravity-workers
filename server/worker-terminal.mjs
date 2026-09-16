@@ -56,6 +56,7 @@ export function launchWorkerTerminal({ run, stdoutPath, stderrPath, completionPa
     team_path: teamPath || null,
     ready_path: `${completionPath}.viewer-ready`,
     poll_ms: 100,
+    auto_close_ms: 120_000,
   };
   const child = spawnProcess(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedPowerShell], {
     cwd: path.dirname(launcherPath),
@@ -226,8 +227,16 @@ function formatResult(payload, completion, cli, stderrText, responseStreamed, us
   if ((completion.status === "failed" || completion.status === "interrupted") && String(stderrText || "").trim()) {
     lines.push("", paint(useColor, `${ANSI.bold}${ANSI.red}`, "Error details:"), paint(useColor, ANSI.red, String(stderrText).trim()));
   }
-  lines.push("", paint(useColor, `${ANSI.dim}${ANSI.green}`, "Close this window when you're done."));
   return `${lines.join("\r\n")}\r\n`;
+}
+
+function formatAutoCloseNotice(autoCloseMs, useColor) {
+  const seconds = Math.ceil(autoCloseMs / 1000);
+  const duration = seconds % 60 === 0 ? `${seconds / 60} minute${seconds === 60 ? "" : "s"}` : `${seconds} seconds`;
+  return `${detailsFrame("WINDOW TIMER", [
+    ["Auto-close", duration, ANSI.yellow],
+    ["Keep open", "Press any key before the timer ends", ANSI.cyan],
+  ], useColor)}\r\n`;
 }
 
 function streamState() {
@@ -388,13 +397,34 @@ async function runViewer() {
     const cli = state.finalResult || parseCliPayload(stdoutText) || {};
     writer.write(formatResult(payload, completion, cli, stderrText, state.responseStreamed, useColor));
     if (!payload.exit_when_complete) {
+      const autoCloseMs = clamp(payload.auto_close_ms, 100, 24 * 60 * 60 * 1000, 120_000);
+      writer.write(`\r\n${formatAutoCloseNotice(autoCloseMs, useColor)}`);
       process.stdin.resume();
       let stopped = false;
-      process.once("SIGINT", () => { stopped = true; });
-      process.once("SIGTERM", () => { stopped = true; });
-      while (!stopped) {
+      let keepOpen = false;
+      const onSignal = () => { stopped = true; };
+      const onInput = (chunk) => {
+        if (Buffer.from(chunk).includes(3)) stopped = true;
+        else keepOpen = true;
+      };
+      const rawMode = Boolean(process.stdin.isTTY && typeof process.stdin.setRawMode === "function");
+      if (rawMode) process.stdin.setRawMode(true);
+      process.stdin.on("data", onInput);
+      process.once("SIGINT", onSignal);
+      process.once("SIGTERM", onSignal);
+      const deadline = Date.now() + autoCloseMs;
+      while (!stopped && !keepOpen && Date.now() < deadline) {
         await pollTeamMessages(payload, state, writer, useColor);
         await new Promise(resolve => setTimeout(resolve, Math.max(250, pollMs)));
+      }
+      process.stdin.off("data", onInput);
+      if (rawMode) process.stdin.setRawMode(false);
+      if (keepOpen && !stopped) {
+        writer.write(`${paint(useColor, `${ANSI.bold}${ANSI.green}`, "\r\n✓ Auto-close cancelled. This window will remain open until you close it.\r\n")}`);
+        while (!stopped) {
+          await pollTeamMessages(payload, state, writer, useColor);
+          await new Promise(resolve => setTimeout(resolve, Math.max(250, pollMs)));
+        }
       }
     }
   } finally {

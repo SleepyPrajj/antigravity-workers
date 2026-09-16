@@ -59,6 +59,7 @@ try {
   assert.equal(launchPayload.completion_path, completionPath);
   assert.equal(launchPayload.team_path, teamPath);
   assert.equal(launchPayload.ready_path, `${completionPath}.viewer-ready`);
+  assert.equal(launchPayload.auto_close_ms, 120_000);
 
   await Promise.all([
     fs.writeFile(stdoutPath, ""),
@@ -155,9 +156,52 @@ try {
   assert.match(plainOutput, /Duration\s+1.25 seconds/);
   assert.match(plainOutput, /Turns\s+2/);
   assert.match(plainOutput, /Run ID\s+viewer-test/);
-  assert.match(plainOutput, /Close this window when you're done\./);
   assert.doesNotMatch(plainOutput, /internal diagnostic/);
   assert.equal(JSON.parse(await fs.readFile(`${completionPath}.viewer-ready`, "utf8")).pid, child.pid);
+
+  const timerPayload = { ...payload, run_id: "viewer-timer-test", ready_path: `${completionPath}.timer-ready`, exit_when_complete: false, auto_close_ms: 300 };
+  const timerChild = spawn(process.execPath, [viewer, "--view-worker"], {
+    env: {
+      ...process.env,
+      ANTIGRAVITY_TERMINAL_TEST_OUTPUT: "stdout",
+      ANTIGRAVITY_TERMINAL_PAYLOAD: Buffer.from(JSON.stringify(timerPayload), "utf8").toString("base64url"),
+    },
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let timerOutput = "";
+  timerChild.stdout.on("data", chunk => { timerOutput += chunk; });
+  await waitFor(() => timerOutput.includes("WINDOW TIMER"));
+  assert.match(timerOutput, /Auto-close\s+1 seconds/);
+  assert.match(timerOutput, /Press any key before the timer ends/);
+  timerChild.stdin.write("k");
+  await waitFor(() => timerOutput.includes("Auto-close cancelled"));
+  timerChild.kill();
+  await new Promise((resolve, reject) => {
+    timerChild.once("error", reject);
+    timerChild.once("close", resolve);
+  });
+
+  const autoClosePayload = { ...timerPayload, run_id: "viewer-auto-close-test", ready_path: `${completionPath}.auto-close-ready`, auto_close_ms: 150 };
+  const autoCloseStartedAt = Date.now();
+  const autoCloseChild = spawn(process.execPath, [viewer, "--view-worker"], {
+    env: {
+      ...process.env,
+      ANTIGRAVITY_TERMINAL_TEST_OUTPUT: "stdout",
+      ANTIGRAVITY_TERMINAL_PAYLOAD: Buffer.from(JSON.stringify(autoClosePayload), "utf8").toString("base64url"),
+    },
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let autoCloseOutput = "";
+  autoCloseChild.stdout.on("data", chunk => { autoCloseOutput += chunk; });
+  const autoCloseExit = await new Promise((resolve, reject) => {
+    autoCloseChild.once("error", reject);
+    autoCloseChild.once("close", resolve);
+  });
+  assert.equal(autoCloseExit, 0);
+  assert.match(autoCloseOutput, /WINDOW TIMER/);
+  assert(Date.now() - autoCloseStartedAt < 2_000, "test viewer should close when its short timer expires");
 
   if (process.platform === "win32") {
     const launcher = path.join(path.dirname(viewer), "worker-terminal.cmd");

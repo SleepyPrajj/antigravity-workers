@@ -55,7 +55,7 @@ Restart your Codex session after registering the server. Ask it to run `doctor` 
 
 Set `ANTIGRAVITY_WORKER_TERMINALS=on` in the MCP server environment to open one read-only Command Prompt window for each running worker, including team members, coordinators, continuations, and retry attempts. Each viewer renders Antigravity's structured response deltas, tool and subagent activity, and incoming coordinator or peer messages as they arrive. Completed windows use a black-and-green `color 0A` theme with a framed agent-information header, the response text, and a separate run-metadata frame containing status, token usage, duration, and identifiers. Team windows continue to receive relevant messages after their worker finishes, and the scheduler continues to parse and persist the original streams normally.
 
-Closing a viewer window does not cancel its worker. Use `cancel_run` or `cancel_team` for cancellation. Completed viewers stay open until the user closes them. The feature is Windows-only and opt-in so headless sessions, CI, and automations do not open desktop windows.
+Closing a viewer window does not cancel its worker. Use `cancel_run` or `cancel_team` for cancellation. After the response and metadata are displayed, completed viewers start a two-minute auto-close timer. Press any key during that timer to cancel it and keep the window open until you close it; relevant team messages continue streaming while it remains open. The feature is Windows-only and opt-in so headless sessions, CI, and automations do not open desktop windows.
 
 For a direct MCP registration, add the environment variable when registering the server:
 
@@ -110,7 +110,7 @@ This is a local orchestration tool, not a security sandbox. Workers run with the
 
 The state directory can contain prompts, responses, logs, worktrees, artifacts, and local runtime authentication material. Keep it outside public repositories. `get_account` returns the active account identifier only when explicitly requested; it does not expose OAuth tokens.
 
-Edit workers require a Git repository. Inspect the patch and relevant tests before calling `apply_run`; read-only teams never apply edits. See [SECURITY.md](SECURITY.md).
+Edit workers require a Git repository. A CLI success result is accepted only when patch capture also produces code changes; denied actions or an empty patch are reported as a failed run and are not automatically retried. Inspect the patch and relevant tests before calling `apply_run`; read-only teams never apply edits. See [SECURITY.md](SECURITY.md).
 
 ## Development and validation
 

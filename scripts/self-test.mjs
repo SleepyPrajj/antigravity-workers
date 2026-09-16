@@ -224,6 +224,24 @@ try {
   });
   assert.equal(applied.isError, false, applied.content?.[0]?.text);
   assert.equal((await fs.readFile(path.join(repository, "antigravity-worker-test.txt"), "utf8")).trim(), "isolated worker output");
+  const deniedEditStarted = await request("tools/call", {
+    name: "start_edit",
+    arguments: {
+      cwd: repository,
+      task: "DENY_EDIT_TEST",
+      acceptance_criteria: "Exercise a denied edit that produces no patch.",
+    },
+  });
+  assert.equal(deniedEditStarted.isError, false, deniedEditStarted.content?.[0]?.text);
+  const deniedEditCompleted = await request("tools/call", {
+    name: "get_run",
+    arguments: { run_id: deniedEditStarted.structuredContent.id, wait_ms: 5000 },
+  });
+  assert.equal(deniedEditCompleted.structuredContent.status, "failed");
+  assert.equal(deniedEditCompleted.structuredContent.patch.empty, true);
+  assert.match(deniedEditCompleted.structuredContent.error, /produced no code changes/i);
+  assert.match(deniedEditCompleted.structuredContent.error, /RunCommand/);
+  assert.equal(deniedEditCompleted.structuredContent.events.filter((event) => event.type === "started").length, 1);
   process.stdout.write("MCP transport, queueing, multimodal analysis, native image artifacts, multi-agent review, messaging, dashboard, isolated edit, and patch application: OK\n");
 } finally {
   child.kill();
