@@ -6,6 +6,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { openRuntime } from "./runtime-owner.mjs";
+import { launchWorkerTerminal, workerTerminalConfig } from "./worker-terminal.mjs";
 
 const VERSION = "0.3.0";
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
@@ -45,6 +46,7 @@ const maxTeamAgents = clampInt(process.env.ANTIGRAVITY_MAX_TEAM_AGENTS, 1, 64, 3
 const defaultModel = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.1-pro-high";
 const balancedModel = process.env.ANTIGRAVITY_BALANCED_MODEL || "gemini-3.8-flash-medium";
 const fastModel = process.env.ANTIGRAVITY_FAST_MODEL || "gemini-3.8-flash-low";
+const terminalConfig = workerTerminalConfig();
 
 await Promise.all([
   fs.mkdir(runsRoot, { recursive: true }),
@@ -510,6 +512,29 @@ function runCommand(command, args, { cwd, input, env, allowFailure = false, maxB
   });
 }
 
+function endWritable(stream) {
+  return new Promise(resolve => {
+    if (stream.closed || stream.destroyed) return resolve();
+    stream.once("error", resolve);
+    stream.end(resolve);
+  });
+}
+
+async function completeWorkerTerminal(run) {
+  if (!run.terminal?.completion_path) return;
+  const completion = {
+    run_id: run.id,
+    attempt: run.attempt,
+    status: run.status,
+    exit_code: run.exit_code,
+    signal: run.signal,
+    finished_at: run.finished_at,
+    message: run.error,
+  };
+  await fs.writeFile(run.terminal.completion_path, `${JSON.stringify(completion)}\n`, { flag: "wx" }).catch(() => {});
+  run.terminal.status = "completed";
+}
+
 async function git(cwd, args, options = {}) {
   return runCommand("git", args, { cwd, ...options });
 }
@@ -713,6 +738,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
 
   const stdoutPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.stdout.log`);
   const stderrPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.stderr.log`);
+  const completionPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.terminal.json`);
   run.logs = { stdout: stdoutPath, stderr: stderrPath };
   const stdoutStream = createWriteStream(stdoutPath, { flags: "w" });
   const stderrStream = createWriteStream(stderrPath, { flags: "w" });
@@ -738,12 +764,21 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
 
   children.set(run.id, child);
   run.pid = child.pid;
+  if (terminalConfig.enabled) {
+    try {
+      run.terminal = launchWorkerTerminal({ run, stdoutPath, stderrPath, completionPath, config: terminalConfig });
+      addRunEvent(run, "terminal_opened", { mode: "cmd", attempt: run.attempt });
+    } catch (error) {
+      run.terminal = { mode: "cmd", status: "launch-failed", error: error.message };
+      addRunEvent(run, "terminal_launch_failed", { error: error.message, attempt: run.attempt });
+    }
+  }
   child.stdout.on("data", (chunk) => {
     stdoutStream.write(chunk);
     stdoutBytes += chunk.length;
     if (stdoutBytes <= 32 * 1024 * 1024) stdoutChunks.push(chunk);
   });
-  child.stderr.pipe(stderrStream);
+  child.stderr.on("data", (chunk) => { stderrStream.write(chunk); });
 
   let finishPersistence;
   const launchPersisted = new Promise(resolve => { finishPersistence = resolve; });
@@ -753,8 +788,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
     await launchPersisted;
     const persisted = await readRecord(runPath(run.id));
     if (persisted?.cancellation_requested) run.cancellation_requested = persisted.cancellation_requested;
-    stdoutStream.end();
-    stderrStream.end();
+    await Promise.all([endWritable(stdoutStream), endWritable(stderrStream)]);
     children.delete(run.id);
     run.exit_code = code;
     run.signal = signal;
@@ -788,6 +822,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
       run.status = run.cancellation_requested ? "cancelled" : "failed";
       run.error = error.message;
     }
+    await completeWorkerTerminal(run);
     const shouldRetry = run.status === "failed" && !run.cancellation_requested && run.attempt <= (run.max_retries || 0);
     if (shouldRetry) {
       addRunEvent(run, "retrying", { attempt: run.attempt + 1, error: run.error });
@@ -1564,6 +1599,7 @@ async function doctor() {
     detected_parallelism: detectedParallelism,
     scheduler_pid: process.pid,
     scheduler_mode: "single-owner-ipc",
+    worker_terminals: terminalConfig,
     queued_runs: queuedLaunches.size,
     active_runs: children.size,
     agy_path: agy,
@@ -1572,7 +1608,7 @@ async function doctor() {
     default_model: defaultModel,
     balanced_model: balancedModel,
     fast_model: fastModel,
-    capabilities: ["queued-runs", "multi-agent-teams", "peer-messaging", "coordinator-review", "correction-rounds", "retries", "live-events", "isolated-edits", "native-image-generation", "native-image-editing", "multimodal-analysis", "artifact-ledger"],
+    capabilities: ["queued-runs", "multi-agent-teams", "peer-messaging", "coordinator-review", "correction-rounds", "retries", "live-events", "windows-worker-terminals", "isolated-edits", "native-image-generation", "native-image-editing", "multimodal-analysis", "artifact-ledger"],
     media_limits: { max_file_bytes: maxMediaFileBytes, max_total_bytes: maxMediaTotalBytes, max_inline_artifact_bytes: maxInlineArtifactBytes },
     safety: "Team workers are read-only. Edit workers use isolated Git worktrees. Media inputs are copied into per-run Git workspaces so Antigravity sees only explicitly supplied files; applying code patches remains a separate Codex-controlled action.",
   };

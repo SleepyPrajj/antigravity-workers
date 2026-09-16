@@ -1,0 +1,263 @@
+import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const viewerScript = fileURLToPath(import.meta.url);
+const TRUE_VALUES = new Set(["1", "true", "yes", "on", "cmd"]);
+
+function clamp(value, min, max, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
+}
+
+export function workerTerminalConfig(env = process.env, platform = process.platform) {
+  const requested = String(env.ANTIGRAVITY_WORKER_TERMINALS || "off").trim().toLowerCase();
+  const supported = platform === "win32";
+  return {
+    requested,
+    supported,
+    enabled: supported && TRUE_VALUES.has(requested),
+    mode: supported && TRUE_VALUES.has(requested) ? "cmd" : "off",
+  };
+}
+
+function safeLabel(value, fallback) {
+  const cleaned = String(value || fallback).replace(/[\x00-\x1f\x7f]/g, " ").trim();
+  return cleaned.slice(0, 120) || fallback;
+}
+
+export function launchWorkerTerminal({ run, stdoutPath, stderrPath, completionPath, config }, dependencies = {}) {
+  const platform = dependencies.platform || process.platform;
+  if (!config?.enabled || platform !== "win32") return null;
+
+  const spawnProcess = dependencies.spawn || spawn;
+  const env = dependencies.env || process.env;
+  const nodePath = dependencies.nodePath || process.execPath;
+  const scriptPath = dependencies.scriptPath || viewerScript;
+  const launcherPath = dependencies.launcherPath || path.join(path.dirname(scriptPath), "worker-terminal.cmd");
+  const powershell = dependencies.powershellPath || path.join(env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const powershellScript = "$child = Start-Process -FilePath $env:ANTIGRAVITY_TERMINAL_LAUNCHER_FILE -WorkingDirectory $env:ANTIGRAVITY_TERMINAL_LAUNCHER_DIR -WindowStyle Normal -PassThru; $child.WaitForExit(); exit $child.ExitCode";
+  const encodedPowerShell = Buffer.from(powershellScript, "utf16le").toString("base64");
+  const payload = {
+    run_id: safeLabel(run.id, "unknown"),
+    kind: safeLabel(run.kind, "worker"),
+    agent_id: run.agent_id ? safeLabel(run.agent_id, "worker") : "",
+    team_stage: run.team_stage ? safeLabel(run.team_stage, "") : "",
+    model: safeLabel(run.model, "unknown"),
+    effort: safeLabel(run.effort, "unknown"),
+    attempt: Number.isInteger(run.attempt) ? run.attempt : 1,
+    worker_pid: Number.isInteger(run.pid) ? run.pid : null,
+    cwd: run.worker_cwd,
+    stdout_path: stdoutPath,
+    stderr_path: stderrPath,
+    completion_path: completionPath,
+    ready_path: `${completionPath}.viewer-ready`,
+    poll_ms: 100,
+  };
+  const child = spawnProcess(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedPowerShell], {
+    cwd: path.dirname(launcherPath),
+    env: {
+      ...env,
+      ANTIGRAVITY_TERMINAL_NODE: nodePath,
+      ANTIGRAVITY_TERMINAL_SCRIPT: scriptPath,
+      ANTIGRAVITY_TERMINAL_LAUNCHER_DIR: path.dirname(launcherPath),
+      ANTIGRAVITY_TERMINAL_LAUNCHER_FILE: launcherPath,
+      ANTIGRAVITY_TERMINAL_PAYLOAD: Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"),
+    },
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  child.once?.("error", () => {});
+  child.unref?.();
+  return {
+    mode: "cmd",
+    status: "opened",
+    launcher_pid: child.pid,
+    completion_path: completionPath,
+    ready_path: payload.ready_path,
+  };
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+function createConsoleWriter() {
+  if (process.env.ANTIGRAVITY_TERMINAL_TEST_OUTPUT === "stdout") {
+    return { write: value => process.stdout.write(value), close() {} };
+  }
+  if (!process.stdout.isTTY) throw new Error("The worker viewer was not launched in a visible console.");
+  return { write: value => process.stdout.write(value), close() {} };
+}
+
+function parseCliPayload(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return null;
+  try { return JSON.parse(trimmed); } catch {}
+  const lines = trimmed.split(/\r?\n/).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try { return JSON.parse(lines[index]); } catch {}
+  }
+  return { response: trimmed };
+}
+
+function valueFrom(object, names) {
+  for (const name of names) {
+    const value = object?.[name];
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+}
+
+function displayText(value) {
+  if (typeof value === "string") return value.trim();
+  if (value === undefined || value === null) return "";
+  return JSON.stringify(value, null, 2);
+}
+
+function titleCase(value) {
+  const text = String(value || "finished").replace(/[_-]+/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+const ANSI = {
+  reset: "\u001b[0m",
+  bold: "\u001b[1m",
+  dim: "\u001b[2m",
+  red: "\u001b[91m",
+  green: "\u001b[92m",
+  yellow: "\u001b[93m",
+  cyan: "\u001b[96m",
+  white: "\u001b[97m",
+  gray: "\u001b[90m",
+};
+
+function paint(enabled, color, value) {
+  return enabled ? `${color}${value}${ANSI.reset}` : String(value);
+}
+
+function detailsFrame(titleText, rows, useColor) {
+  const width = 72;
+  const title = ` ${titleText} `;
+  const left = Math.floor((width - title.length) / 2);
+  const right = width - title.length - left;
+  const frameColor = useColor ? ANSI.green : "";
+  const reset = useColor ? ANSI.reset : "";
+  const output = [`${frameColor}╔${"═".repeat(left)}${title}${"═".repeat(right)}╗${reset}`];
+  for (const [label, rawValue, color = ANSI.white] of rows) {
+    const labelText = ` ${String(label).padEnd(15)}`;
+    const valueText = String(rawValue).slice(0, width - labelText.length);
+    const padding = " ".repeat(width - labelText.length - valueText.length);
+    output.push(`${frameColor}║${reset}${paint(useColor, ANSI.green, labelText)}${paint(useColor, color, valueText)}${padding}${frameColor}║${reset}`);
+  }
+  output.push(`${frameColor}╚${"═".repeat(width)}╝${reset}`);
+  return output.join("\r\n");
+}
+
+function formatResult(payload, completion, stdoutText, stderrText) {
+  const cli = parseCliPayload(stdoutText) || {};
+  const response = displayText(cli.response ?? cli.result) || completion.message || displayText(cli.error) || "No response returned.";
+  const usage = cli.usage || {};
+  const inputTokens = valueFrom(usage, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
+  const outputTokens = valueFrom(usage, ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]);
+  const reportedTotal = valueFrom(usage, ["total_tokens", "totalTokens"]);
+  const totalTokens = reportedTotal ?? (Number.isFinite(inputTokens) && Number.isFinite(outputTokens) ? inputTokens + outputTokens : undefined);
+  const cachedTokens = valueFrom(usage, ["cached_tokens", "cachedTokens", "cache_read_tokens", "cacheReadTokens"]);
+  const useColor = process.env.ANTIGRAVITY_TERMINAL_TEST_COLOR === "1" || (Boolean(process.stdout.isTTY) && !("NO_COLOR" in process.env));
+  const status = titleCase(completion.status || cli.status);
+  const statusColor = ["Failed", "Interrupted", "Cancelled"].includes(status) ? ANSI.red : ANSI.green;
+  const agentRows = [
+    ["Agent", payload.agent_id || "Standalone", ANSI.white],
+    ["Type", payload.kind, ANSI.cyan],
+    ["Model", payload.model, ANSI.cyan],
+    ["Effort", payload.effort, ANSI.yellow],
+    payload.team_stage ? ["Stage", payload.team_stage, ANSI.cyan] : null,
+  ].filter(Boolean);
+  const metadataRows = [
+    ["Status", status, statusColor],
+    inputTokens !== undefined ? ["Input tokens", inputTokens, ANSI.yellow] : null,
+    outputTokens !== undefined ? ["Output tokens", outputTokens, ANSI.yellow] : null,
+    totalTokens !== undefined ? ["Total tokens", totalTokens, ANSI.yellow] : null,
+    cachedTokens !== undefined ? ["Cached tokens", cachedTokens, ANSI.yellow] : null,
+    cli.duration_seconds !== undefined ? ["Duration", `${cli.duration_seconds} seconds`, ANSI.cyan] : null,
+    cli.num_turns !== undefined ? ["Turns", cli.num_turns, ANSI.yellow] : null,
+    Number.isInteger(completion.exit_code) ? ["Exit code", completion.exit_code, ANSI.white] : null,
+    ["Attempt", payload.attempt, ANSI.yellow],
+    cli.conversation_id ? ["Conversation", cli.conversation_id, ANSI.gray] : null,
+    ["Run ID", payload.run_id, ANSI.gray],
+  ].filter(Boolean);
+  const lines = [
+    detailsFrame("ANTIGRAVITY AGENT", agentRows, useColor),
+    "",
+    paint(useColor, `${ANSI.bold}${ANSI.cyan}`, response),
+    "",
+    paint(useColor, ANSI.green, "---"),
+    detailsFrame("RUN METADATA", metadataRows, useColor),
+  ];
+  if ((completion.status === "failed" || completion.status === "interrupted") && String(stderrText || "").trim()) {
+    lines.push("", paint(useColor, `${ANSI.bold}${ANSI.red}`, "Error details:"), paint(useColor, ANSI.red, String(stderrText).trim()));
+  }
+  lines.push("", paint(useColor, `${ANSI.dim}${ANSI.green}`, "Close this window when you're done."));
+  return `${lines.join("\r\n")}\r\n`;
+}
+
+async function runViewer() {
+  const encoded = process.env.ANTIGRAVITY_TERMINAL_PAYLOAD;
+  if (!encoded) throw new Error("Missing ANTIGRAVITY_TERMINAL_PAYLOAD.");
+  const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  const writer = createConsoleWriter();
+  process.title = `Antigravity ${payload.agent_id || payload.kind} - ${payload.run_id}`;
+  await fs.writeFile(payload.ready_path, `${JSON.stringify({ pid: process.pid, is_tty: Boolean(process.stdout.isTTY), started_at: new Date().toISOString() })}\n`, { flag: "wx" }).catch(() => {});
+
+  let completion = null;
+  let workerGoneAt = null;
+  const pollMs = clamp(payload.poll_ms, 25, 1000, 100);
+  try {
+    while (!completion) {
+      completion = await fs.readFile(payload.completion_path, "utf8").then(JSON.parse).catch(error => {
+        if (error.code === "ENOENT" || error instanceof SyntaxError) return null;
+        throw error;
+      });
+      if (completion) break;
+      if (payload.worker_pid && !isPidAlive(payload.worker_pid)) workerGoneAt ??= Date.now();
+      else workerGoneAt = null;
+      if (workerGoneAt && Date.now() - workerGoneAt >= 2000) {
+        completion = { status: "interrupted", message: "Worker exited before the scheduler wrote its completion record." };
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, pollMs));
+    }
+    const [stdoutText, stderrText] = await Promise.all([
+      fs.readFile(payload.stdout_path, "utf8").catch(() => ""),
+      fs.readFile(payload.stderr_path, "utf8").catch(() => ""),
+    ]);
+    writer.write(formatResult(payload, completion, stdoutText, stderrText));
+    if (!payload.exit_when_complete) {
+      process.stdin.resume();
+      await new Promise(resolve => {
+        process.once("SIGINT", resolve);
+        process.once("SIGTERM", resolve);
+      });
+    }
+  } finally {
+    writer.close();
+  }
+}
+
+if (process.argv.includes("--view-worker")) {
+  runViewer().catch(error => {
+    try {
+      const writer = createConsoleWriter();
+      writer.write(`Antigravity worker terminal failed: ${error.message}\r\n`);
+      writer.close();
+    } catch {}
+    process.exitCode = 1;
+  });
+}
