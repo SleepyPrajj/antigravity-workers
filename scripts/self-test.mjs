@@ -28,6 +28,7 @@ const child = spawn(process.execPath, [server], {
     ANTIGRAVITY_ACCOUNT_FILE: accountFile,
     ANTIGRAVITY_MOCK_FAIL_ONCE_FILE: failOnceFile,
     ANTIGRAVITY_BRAIN_DIR: brainDirectory,
+    ANTIGRAVITY_MAX_BUFFERED_STDOUT_BYTES: "1024",
   },
   stdio: ["pipe", "pipe", "inherit"],
   windowsHide: true,
@@ -128,8 +129,23 @@ try {
   assert.equal(retryCompleted.structuredContent.status, "succeeded", retryCompleted.content?.[0]?.text);
   assert.equal(retryCompleted.structuredContent.attempt, 2);
   assert(retryCompleted.structuredContent.events.some((event) => event.type === "retrying"));
+  const cappedStarted = await request("tools/call", {
+    name: "start_analysis",
+    arguments: { cwd: here, task: "STREAM_CAP_TEST return the final result after oversized progress.", max_retries: 0 },
+  });
+  const cappedCompleted = await request("tools/call", {
+    name: "get_run",
+    arguments: { run_id: cappedStarted.structuredContent.id, wait_ms: 5000 },
+  });
+  assert.equal(cappedCompleted.structuredContent.status, "succeeded", cappedCompleted.content?.[0]?.text);
+  assert.match(cappedCompleted.structuredContent.response, /MOCK_OK/);
+  await fs.writeFile(path.join(state, "runs", `${runId}.attempt-1.terminal.json`), JSON.stringify({ run_id: runId, status: "succeeded" }), "utf8");
   const recent = await request("tools/call", { name: "list_runs", arguments: { limit: 5 } });
-  assert.equal(recent.structuredContent.count, 3);
+  assert.equal(recent.structuredContent.count, 4);
+  assert(recent.structuredContent.runs.every((run) => run.id && run.kind));
+  const projectRuns = await request("tools/call", { name: "list_runs", arguments: { cwd: here, limit: 5 } });
+  assert.equal(projectRuns.isError, false, projectRuns.content?.[0]?.text);
+  assert.equal(projectRuns.structuredContent.count, 4);
 
   const mediaStarted = await request("tools/call", {
     name: "start_media_analysis",

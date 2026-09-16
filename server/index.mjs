@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { openRuntime } from "./runtime-owner.mjs";
 import { launchWorkerTerminal, workerTerminalConfig } from "./worker-terminal.mjs";
 
@@ -22,6 +23,7 @@ const defaultStateRoot = process.platform === "win32"
   : path.join(os.homedir(), ".codex", "antigravity-workers");
 const stateRoot = path.resolve(process.env.ANTIGRAVITY_STATE_DIR || defaultStateRoot);
 const runsRoot = path.join(stateRoot, "runs");
+const terminalsRoot = path.join(stateRoot, "terminals");
 const slotsRoot = path.join(stateRoot, "slots");
 const worktreesRoot = path.join(stateRoot, "worktrees");
 const teamsRoot = path.join(stateRoot, "teams");
@@ -47,9 +49,11 @@ const defaultModel = process.env.ANTIGRAVITY_DEFAULT_MODEL || "gemini-3.1-pro-hi
 const balancedModel = process.env.ANTIGRAVITY_BALANCED_MODEL || "gemini-3.8-flash-medium";
 const fastModel = process.env.ANTIGRAVITY_FAST_MODEL || "gemini-3.8-flash-low";
 const terminalConfig = workerTerminalConfig();
+const maxBufferedStdoutBytes = clampInt(process.env.ANTIGRAVITY_MAX_BUFFERED_STDOUT_BYTES, 1024, 32 * 1024 * 1024, 32 * 1024 * 1024);
 
 await Promise.all([
   fs.mkdir(runsRoot, { recursive: true }),
+  fs.mkdir(terminalsRoot, { recursive: true }),
   fs.mkdir(slotsRoot, { recursive: true }),
   fs.mkdir(worktreesRoot, { recursive: true }),
   fs.mkdir(teamsRoot, { recursive: true }),
@@ -270,6 +274,14 @@ async function captureGeneratedArtifacts(run) {
 function runPath(runId) {
   if (!/^[A-Za-z0-9-]+$/.test(runId)) throw new Error("Invalid run_id.");
   return path.join(runsRoot, `${runId}.json`);
+}
+
+function isRunRecordFilename(name) {
+  return /^[A-Za-z0-9-]+\.json$/.test(name);
+}
+
+async function listRunRecordFiles() {
+  return (await fs.readdir(runsRoot)).filter(isRunRecordFilename);
 }
 
 async function serializedAtomicWrite(chains, key, target, contents) {
@@ -637,6 +649,24 @@ function parseAgyOutput(buffer) {
   }
 }
 
+function streamResultCollector() {
+  return { decoder: new StringDecoder("utf8"), lineBuffer: "", result: null };
+}
+
+function collectStreamResults(state, chunk, flush = false) {
+  state.lineBuffer += chunk ? state.decoder.write(chunk) : "";
+  if (flush) state.lineBuffer += state.decoder.end();
+  const lines = state.lineBuffer.split(/\r?\n/);
+  state.lineBuffer = flush ? "" : lines.pop() || "";
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const payload = JSON.parse(line);
+      if (payload?.event === "result" && payload.result) state.result = payload.result;
+    } catch {}
+  }
+}
+
 function deniedActionSummary(actions) {
   const entries = Array.isArray(actions) ? actions : actions ? [actions] : [];
   const names = entries
@@ -752,12 +782,13 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
 
   const stdoutPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.stdout.log`);
   const stderrPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.stderr.log`);
-  const completionPath = path.join(runsRoot, `${run.id}.attempt-${run.attempt}.terminal.json`);
+  const completionPath = path.join(terminalsRoot, `${run.id}.attempt-${run.attempt}.json`);
   run.logs = { stdout: stdoutPath, stderr: stderrPath };
   const stdoutStream = createWriteStream(stdoutPath, { flags: "w" });
   const stderrStream = createWriteStream(stderrPath, { flags: "w" });
   const stdoutChunks = [];
   let stdoutBytes = 0;
+  const resultCollector = streamResultCollector();
 
   let child;
   try {
@@ -796,8 +827,10 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
   }
   child.stdout.on("data", (chunk) => {
     stdoutStream.write(chunk);
+    collectStreamResults(resultCollector, chunk);
+    const remaining = maxBufferedStdoutBytes - stdoutBytes;
+    if (remaining > 0) stdoutChunks.push(chunk.subarray(0, remaining));
     stdoutBytes += chunk.length;
-    if (stdoutBytes <= 32 * 1024 * 1024) stdoutChunks.push(chunk);
   });
   child.stderr.on("data", (chunk) => { stderrStream.write(chunk); });
 
@@ -816,7 +849,8 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
     run.finished_at = isoNow();
     let editResultInvalid = false;
     try {
-      const payload = parseAgyOutput(Buffer.concat(stdoutChunks));
+      collectStreamResults(resultCollector, null, true);
+      const payload = resultCollector.result || parseAgyOutput(Buffer.concat(stdoutChunks));
       run.conversation_id = payload.conversation_id || run.conversation_id;
       run.response = payload.response ?? payload.result ?? payload;
       run.usage = payload.usage;
@@ -888,8 +922,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
 }
 
 async function conversationBusy(conversationId, except) {
-  for (const file of await fs.readdir(runsRoot)) {
-    if (!file.endsWith(".json")) continue;
+  for (const file of await listRunRecordFiles()) {
     const run = await readRecord(path.join(runsRoot, file));
     if (run?.id !== except && run?.status === "running" && (run.resume_conversation_id || run.conversation_id) === conversationId) {
       if ((await readRun(run.id)).status === "running") return true;
@@ -1086,7 +1119,7 @@ async function getRun(input) {
 async function listRuns(input) {
   const limit = clampInt(input.limit, 1, 100, 20);
   const cwd = input.cwd ? path.resolve(input.cwd) : null;
-  const files = (await fs.readdir(runsRoot)).filter((name) => name.endsWith(".json"));
+  const files = await listRunRecordFiles();
   const runs = [];
   for (const file of files) {
     const run = await fs.readFile(path.join(runsRoot, file), "utf8").then(JSON.parse).catch(() => null);
@@ -1539,8 +1572,7 @@ async function cancelTeam(input) {
 
 async function cancelTeamChildren(teamId) {
   // Include children not yet linked by a driver write and peer continuations.
-  for (const file of await fs.readdir(runsRoot)) {
-    if (!file.endsWith(".json")) continue;
+  for (const file of await listRunRecordFiles()) {
     const run = await readRecord(path.join(runsRoot, file));
     if (run?.team_id === teamId && !TERMINAL.has(run.status)) await cancelRun({ run_id: run.id });
   }
@@ -2004,7 +2036,7 @@ async function handle(message) {
 }
 
 async function restoreOperationalState() {
-  const runFiles = (await fs.readdir(runsRoot)).filter((name) => name.endsWith(".json"));
+  const runFiles = await listRunRecordFiles();
   for (const file of runFiles) {
     const run = await fs.readFile(path.join(runsRoot, file), "utf8").then(JSON.parse).catch(() => null);
     if (!run || run.status !== "queued" || run.cancellation_requested) continue;

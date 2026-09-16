@@ -200,6 +200,8 @@ function formatAgentHeader(payload, useColor) {
 function formatResult(payload, completion, cli, stderrText, responseStreamed, useColor) {
   cli ||= {};
   const response = displayText(cli.response ?? cli.result) || completion.message || displayText(cli.error) || "No response returned.";
+  const failed = ["failed", "interrupted", "cancelled"].includes(String(completion.status || cli.status || "").toLowerCase());
+  const failureMessage = completion.message || displayText(cli.error) || (failed ? response : "");
   const usage = cli.usage || {};
   const inputTokens = valueFrom(usage, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
   const outputTokens = valueFrom(usage, ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]);
@@ -222,7 +224,8 @@ function formatResult(payload, completion, cli, stderrText, responseStreamed, us
     ["Run ID", payload.run_id, ANSI.gray],
   ].filter(Boolean);
   const lines = [];
-  if (!responseStreamed) lines.push("", paint(useColor, `${ANSI.bold}${ANSI.cyan}`, response));
+  if (!responseStreamed && !failed) lines.push("", paint(useColor, `${ANSI.bold}${ANSI.cyan}`, response));
+  if (failed) lines.push("", paint(useColor, `${ANSI.bold}${ANSI.red}`, `Failure: ${failureMessage || "The worker did not complete successfully."}`));
   lines.push("", paint(useColor, ANSI.green, "---"), detailsFrame("RUN METADATA", metadataRows, useColor));
   if ((completion.status === "failed" || completion.status === "interrupted") && String(stderrText || "").trim()) {
     lines.push("", paint(useColor, `${ANSI.bold}${ANSI.red}`, "Error details:"), paint(useColor, ANSI.red, String(stderrText).trim()));
@@ -419,6 +422,7 @@ async function runViewer() {
       }
       process.stdin.off("data", onInput);
       if (rawMode) process.stdin.setRawMode(false);
+      process.stdin.pause();
       if (keepOpen && !stopped) {
         writer.write(`${paint(useColor, `${ANSI.bold}${ANSI.green}`, "\r\n✓ Auto-close cancelled. This window will remain open until you close it.\r\n")}`);
         while (!stopped) {

@@ -35,6 +35,9 @@ if (prompt.includes("FAIL_ONCE") && process.env.ANTIGRAVITY_MOCK_FAIL_ONCE_FILE)
 if (prompt.includes("CREATE_EDIT_TEST_FILE")) {
   await fs.writeFile("antigravity-worker-test.txt", "isolated worker output\n", "utf8");
 }
+if (prompt.includes("STREAM_CAP_TEST")) {
+  process.stdout.write(`${JSON.stringify({ event: "step_update", step_update: { step_index: 99, state: "ACTIVE", step_type: "system_message", text_delta: "x".repeat(4096) } })}\n`);
+}
 if (prompt.includes("native generate_image tool") && process.env.ANTIGRAVITY_BRAIN_DIR) {
   const outputDirectory = path.join(process.env.ANTIGRAVITY_BRAIN_DIR, conversation);
   await fs.mkdir(outputDirectory, { recursive: true });

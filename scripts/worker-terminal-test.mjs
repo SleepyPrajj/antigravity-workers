@@ -22,6 +22,17 @@ async function waitFor(predicate, timeoutMs = 2_000) {
   }
 }
 
+function waitForExit(child, timeoutMs = 2_000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("Timed out waiting for terminal viewer to exit."));
+    }, timeoutMs);
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("close", (code) => { clearTimeout(timer); resolve(code); });
+  });
+}
+
 try {
   assert.equal(workerTerminalConfig({}, "linux").enabled, false);
   assert.equal(workerTerminalConfig({ ANTIGRAVITY_WORKER_TERMINALS: "on" }, "linux").enabled, false);
@@ -191,14 +202,11 @@ try {
       ANTIGRAVITY_TERMINAL_PAYLOAD: Buffer.from(JSON.stringify(autoClosePayload), "utf8").toString("base64url"),
     },
     windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
   let autoCloseOutput = "";
   autoCloseChild.stdout.on("data", chunk => { autoCloseOutput += chunk; });
-  const autoCloseExit = await new Promise((resolve, reject) => {
-    autoCloseChild.once("error", reject);
-    autoCloseChild.once("close", resolve);
-  });
+  const autoCloseExit = await waitForExit(autoCloseChild);
   assert.equal(autoCloseExit, 0);
   assert.match(autoCloseOutput, /WINDOW TIMER/);
   assert(Date.now() - autoCloseStartedAt < 2_000, "test viewer should close when its short timer expires");
@@ -229,6 +237,41 @@ try {
     assert(cmdOutput.indexOf("Hello from the worker!") < cmdOutput.indexOf("RUN METADATA"));
     assert.match(cmdOutput, /Status\s+Succeeded/);
   }
+
+  const failedStdoutPath = path.join(root, "failed-stdout.log");
+  const failedStderrPath = path.join(root, "failed-stderr.log");
+  const failedCompletionPath = path.join(root, "failed-complete.json");
+  await Promise.all([
+    fs.writeFile(failedStdoutPath, [
+      JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "ACTIVE", step_type: "agent_response", text_delta: "Partial streamed response." } }),
+      JSON.stringify({ event: "result", result: { status: "FAILED", response: "Partial streamed response.", error: "CLI failure detail." } }),
+    ].join("\n") + "\n", "utf8"),
+    fs.writeFile(failedStderrPath, "", "utf8"),
+    fs.writeFile(failedCompletionPath, JSON.stringify({ status: "failed", exit_code: 1, message: "Worker failed after the partial response." }), "utf8"),
+  ]);
+  const failedPayload = {
+    ...payload,
+    run_id: "viewer-failure-test",
+    stdout_path: failedStdoutPath,
+    stderr_path: failedStderrPath,
+    completion_path: failedCompletionPath,
+    ready_path: `${failedCompletionPath}.viewer-ready`,
+  };
+  const failedChild = spawn(process.execPath, [viewer, "--view-worker"], {
+    env: {
+      ...process.env,
+      ANTIGRAVITY_TERMINAL_TEST_OUTPUT: "stdout",
+      ANTIGRAVITY_TERMINAL_PAYLOAD: Buffer.from(JSON.stringify(failedPayload), "utf8").toString("base64url"),
+    },
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let failedOutput = "";
+  failedChild.stdout.on("data", chunk => { failedOutput += chunk; });
+  assert.equal(await waitForExit(failedChild), 0);
+  assert.match(failedOutput, /Partial streamed response\./);
+  assert.match(failedOutput, /Failure: Worker failed after the partial response\./);
+  assert.match(failedOutput, /Status\s+Failed/);
   const launcherText = await fs.readFile(path.join(path.dirname(viewer), "worker-terminal.cmd"), "utf8");
   assert.match(launcherText, /chcp 65001 >nul/i);
   assert.match(launcherText, /color 0A/i);
