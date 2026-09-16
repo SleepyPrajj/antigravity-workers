@@ -12,6 +12,15 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-terminal-test-
 const stdoutPath = path.join(root, "stdout.log");
 const stderrPath = path.join(root, "stderr.log");
 const completionPath = path.join(root, "complete.json");
+const teamPath = path.join(root, "team.json");
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for streamed terminal output.");
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
 
 try {
   assert.equal(workerTerminalConfig({}, "linux").enabled, false);
@@ -25,6 +34,7 @@ try {
     stdoutPath,
     stderrPath,
     completionPath,
+    teamPath,
     config: workerTerminalConfig({ ANTIGRAVITY_WORKER_TERMINALS: "on" }, "win32"),
   }, {
     platform: "win32",
@@ -47,9 +57,17 @@ try {
   const launchPayload = JSON.parse(Buffer.from(launch.options.env.ANTIGRAVITY_TERMINAL_PAYLOAD, "base64url").toString("utf8"));
   assert.equal(launchPayload.agent_id, "alpha");
   assert.equal(launchPayload.completion_path, completionPath);
+  assert.equal(launchPayload.team_path, teamPath);
   assert.equal(launchPayload.ready_path, `${completionPath}.viewer-ready`);
 
-  await Promise.all([fs.writeFile(stdoutPath, ""), fs.writeFile(stderrPath, "")]);
+  await Promise.all([
+    fs.writeFile(stdoutPath, ""),
+    fs.writeFile(stderrPath, ""),
+    fs.writeFile(teamPath, JSON.stringify({ messages: [
+      { id: "message-1", from: "coordinator", to: "alpha", kind: "feedback", body: "Check the parser edge case." },
+      { id: "message-2", from: "beta", to: "gamma", kind: "peer-message", body: "Private beta-gamma note." },
+    ] })),
+  ]);
   const payload = {
     run_id: "viewer-test",
     kind: "analysis",
@@ -63,6 +81,7 @@ try {
     stdout_path: stdoutPath,
     stderr_path: stderrPath,
     completion_path: completionPath,
+    team_path: teamPath,
     ready_path: `${completionPath}.viewer-ready`,
     poll_ms: 25,
     exit_when_complete: true,
@@ -80,14 +99,28 @@ try {
   let output = "", errors = "";
   child.stdout.on("data", chunk => { output += chunk; });
   child.stderr.on("data", chunk => { errors += chunk; });
+  await waitFor(() => output.includes("ANTIGRAVITY AGENT") && output.includes("Check the parser edge case."));
+  await fs.appendFile(stdoutPath, [
+    JSON.stringify({ event: "init", conversation_id: "conversation-1", init: { cwd: root } }),
+    JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "ACTIVE", step_type: "tool", tool_name: "read_file" } }),
+    JSON.stringify({ event: "step_update", step_update: { step_index: 2, state: "ACTIVE", step_type: "agent_response", text_delta: "Hello " } }),
+  ].join("\n") + "\n", "utf8");
+  await waitFor(() => output.includes("Hello "));
+  assert.doesNotMatch(output, /RUN METADATA/);
+  await fs.appendFile(stdoutPath, JSON.stringify({ event: "step_update", step_update: { step_index: 2, state: "DONE", step_type: "agent_response", text_delta: "from the worker!" } }) + "\n", "utf8");
+  const unicodeEvent = Buffer.from(JSON.stringify({ event: "step_update", step_update: { step_index: 3, state: "DONE", step_type: "agent_response", text_delta: " 🚀" } }) + "\n", "utf8");
+  const rocketOffset = unicodeEvent.indexOf(Buffer.from("🚀", "utf8"));
+  await fs.appendFile(stdoutPath, unicodeEvent.subarray(0, rocketOffset + 1));
   await new Promise(resolve => setTimeout(resolve, 75));
-  await fs.writeFile(stdoutPath, JSON.stringify({
-    status: "SUCCESS",
-    response: "Hello from the worker!",
-    duration_seconds: 1.25,
-    num_turns: 2,
-    usage: { input_tokens: 10, output_tokens: 5 },
-  }), "utf8");
+  await fs.appendFile(stdoutPath, unicodeEvent.subarray(rocketOffset + 1));
+  await fs.appendFile(stdoutPath, JSON.stringify({ event: "result", result: {
+      conversation_id: "conversation-1",
+      status: "SUCCESS",
+      response: "Hello from the worker!",
+      duration_seconds: 1.25,
+      num_turns: 2,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    } }) + "\n", "utf8");
   await fs.writeFile(stderrPath, "internal diagnostic that should stay hidden on success\n", "utf8");
   await fs.writeFile(completionPath, JSON.stringify({ status: "succeeded", exit_code: 0 }), "utf8");
   const exitCode = await new Promise((resolve, reject) => {
@@ -108,6 +141,13 @@ try {
   assert.match(plainOutput, /Type\s+analysis/);
   assert.match(plainOutput, /Model\s+mock-model/);
   assert.match(plainOutput, /Effort\s+high/);
+  assert.match(plainOutput, /LIVE ACTIVITY/);
+  assert.match(plainOutput, /\[connected · conversation-1\]/);
+  assert.match(plainOutput, /\[tool ›\] read_file · ACTIVE/);
+  assert.match(plainOutput, /\[TEAM · feedback\] coordinator → alpha/);
+  assert.match(plainOutput, /Check the parser edge case\./);
+  assert.match(plainOutput, /🚀/);
+  assert.doesNotMatch(plainOutput, /�|Private beta-gamma note/);
   assert.match(plainOutput, /---[\s\S]*Status\s+Succeeded/);
   assert.match(plainOutput, /Input tokens\s+10/);
   assert.match(plainOutput, /Output tokens\s+5/);

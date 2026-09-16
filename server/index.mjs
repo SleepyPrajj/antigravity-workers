@@ -621,12 +621,18 @@ function parseAgyOutput(buffer) {
   const text = buffer.toString("utf8").trim();
   if (!text) throw new Error("Antigravity returned no JSON output.");
   try {
-    return JSON.parse(text);
+    const payload = JSON.parse(text);
+    return payload?.event === "result" && payload.result ? payload.result : payload;
   } catch {
     const lines = text.split(/\r?\n/).filter(Boolean);
+    const parsed = [];
     for (let index = lines.length - 1; index >= 0; index -= 1) {
-      try { return JSON.parse(lines[index]); } catch {}
+      try { parsed.push(JSON.parse(lines[index])); } catch {}
     }
+    const resultEvent = parsed.find(payload => payload?.event === "result" && payload.result);
+    if (resultEvent) return resultEvent.result;
+    const legacyPayload = parsed.find(payload => payload && typeof payload === "object" && !payload.event);
+    if (legacyPayload) return legacyPayload;
     throw new Error(`Antigravity returned invalid JSON: ${text.slice(0, 500)}`);
   }
 }
@@ -729,7 +735,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
     "-p", run.prompt,
     "--model", run.model,
     "--effort", run.effort,
-    "--output-format", "json",
+    "--output-format", "stream-json",
     "--mode", run.worker_mode,
     "--add-dir", run.worker_cwd,
     "--print-timeout", `${run.timeout_minutes}m`,
@@ -749,7 +755,7 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
   try {
     child = spawn(agy, args, {
       cwd: run.worker_cwd,
-      env: { ...process.env, NO_COLOR: "1" },
+      env: { ...process.env, NO_COLOR: "1", AGY_CLI_HIDE_ACCOUNT_INFO: "1" },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -766,7 +772,14 @@ async function launchRunSerial(run, { conversationId, fromQueue = false } = {}) 
   run.pid = child.pid;
   if (terminalConfig.enabled) {
     try {
-      run.terminal = launchWorkerTerminal({ run, stdoutPath, stderrPath, completionPath, config: terminalConfig });
+      run.terminal = launchWorkerTerminal({
+        run,
+        stdoutPath,
+        stderrPath,
+        completionPath,
+        teamPath: run.team_id ? teamPath(run.team_id) : null,
+        config: terminalConfig,
+      });
       addRunEvent(run, "terminal_opened", { mode: "cmd", attempt: run.attempt });
     } catch (error) {
       run.terminal = { mode: "cmd", status: "launch-failed", error: error.message };
