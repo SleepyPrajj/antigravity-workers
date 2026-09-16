@@ -144,6 +144,8 @@ const ANSI = {
   red: "\u001b[91m",
   green: "\u001b[92m",
   yellow: "\u001b[93m",
+  blue: "\u001b[94m",
+  magenta: "\u001b[95m",
   cyan: "\u001b[96m",
   white: "\u001b[97m",
   gray: "\u001b[90m",
@@ -175,6 +177,14 @@ function colorEnabled() {
   return process.env.ANTIGRAVITY_TERMINAL_TEST_COLOR === "1" || (Boolean(process.stdout.isTTY) && !("NO_COLOR" in process.env));
 }
 
+function sectionBanner(titleText, useColor, color = ANSI.magenta) {
+  const width = 72;
+  const title = ` ${titleText} `;
+  const side = Math.max(2, Math.floor((width - title.length) / 2));
+  const remainder = Math.max(2, width - title.length - side);
+  return paint(useColor, `${ANSI.bold}${color}`, `${"─".repeat(side)}${title}${"─".repeat(remainder)}`);
+}
+
 function formatAgentHeader(payload, useColor) {
   const rows = [
     ["Agent", payload.agent_id || "Standalone", ANSI.white],
@@ -183,7 +193,7 @@ function formatAgentHeader(payload, useColor) {
     ["Effort", payload.effort, ANSI.yellow],
     payload.team_stage ? ["Stage", payload.team_stage, ANSI.cyan] : null,
   ].filter(Boolean);
-  return `${detailsFrame("ANTIGRAVITY AGENT", rows, useColor)}\r\n\r\n${paint(useColor, `${ANSI.bold}${ANSI.green}`, "LIVE ACTIVITY")}\r\n`;
+  return `${detailsFrame("ANTIGRAVITY AGENT", rows, useColor)}\r\n\r\n${sectionBanner("LIVE RESPONSE & ACTIVITY", useColor)}\r\n`;
 }
 
 function formatResult(payload, completion, cli, stderrText, responseStreamed, useColor) {
@@ -294,7 +304,7 @@ function renderStreamRecord(record, state, writer, useColor) {
   } else if (step.step_type === "subagent") {
     const agents = Array.isArray(step.subagent_info?.subagents) ? step.subagent_info.subagents : [];
     const names = agents.map(agent => agent.role || agent.type_name).filter(Boolean).join(", ") || "subagent";
-    writer.write(`\r\n${paint(useColor, ANSI.yellow, `[subagent] ${shortLabel(names)} · ${shortLabel(step.state, "ACTIVE")}`)}\r\n`);
+    writer.write(`\r\n${paint(useColor, ANSI.magenta, `[subagent ◆] ${shortLabel(names)} · ${shortLabel(step.state, "ACTIVE")}`)}\r\n`);
   } else if (["checkpoint", "system_message"].includes(step.step_type)) {
     writer.write(`\r\n${paint(useColor, ANSI.gray, `[${shortLabel(step.step_type)}] ${shortLabel(step.state, "UPDATE")}`)}\r\n`);
   }
@@ -326,7 +336,15 @@ async function pollTeamMessages(payload, state, writer, useColor) {
     if (!incoming) continue;
     const kind = shortLabel(message.kind, "message");
     const route = `${shortLabel(message.from, "unknown")} → ${shortLabel(message.to, payload.agent_id)}`;
-    writer.write(`\r\n${paint(useColor, `${ANSI.bold}${ANSI.yellow}`, `[TEAM · ${kind}] ${route}`)}\r\n${paint(useColor, ANSI.white, String(message.body || "").trim())}\r\n`);
+    const timestamp = message.at ? new Date(message.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "live";
+    const body = String(message.body || "").trim().split(/\r?\n/).map(line => `${paint(useColor, ANSI.magenta, "│")} ${paint(useColor, ANSI.white, line)}`).join("\r\n");
+    writer.write([
+      "",
+      paint(useColor, `${ANSI.bold}${ANSI.magenta}`, `┌─ TEAM MESSAGE · ${kind.toUpperCase()} ${"─".repeat(Math.max(2, 49 - kind.length))}`),
+      `${paint(useColor, ANSI.magenta, "│")} ${paint(useColor, ANSI.yellow, route)} ${paint(useColor, ANSI.gray, `· ${timestamp}`)}`,
+      body,
+      paint(useColor, ANSI.magenta, `└${"─".repeat(71)}`),
+    ].join("\r\n") + "\r\n");
   }
 }
 

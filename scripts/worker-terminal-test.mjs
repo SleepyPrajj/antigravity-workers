@@ -141,10 +141,10 @@ try {
   assert.match(plainOutput, /Type\s+analysis/);
   assert.match(plainOutput, /Model\s+mock-model/);
   assert.match(plainOutput, /Effort\s+high/);
-  assert.match(plainOutput, /LIVE ACTIVITY/);
+  assert.match(plainOutput, /LIVE RESPONSE & ACTIVITY/);
   assert.match(plainOutput, /\[connected · conversation-1\]/);
   assert.match(plainOutput, /\[tool ›\] read_file · ACTIVE/);
-  assert.match(plainOutput, /\[TEAM · feedback\] coordinator → alpha/);
+  assert.match(plainOutput, /TEAM MESSAGE · FEEDBACK[\s\S]*coordinator → alpha/);
   assert.match(plainOutput, /Check the parser edge case\./);
   assert.match(plainOutput, /🚀/);
   assert.doesNotMatch(plainOutput, /�|Private beta-gamma note/);
